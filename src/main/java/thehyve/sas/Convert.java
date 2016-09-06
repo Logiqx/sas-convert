@@ -11,6 +11,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
+import java.math.BigDecimal;
+import java.math.MathContext;
+import java.math.RoundingMode;
+import java.text.SimpleDateFormat;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 
@@ -43,12 +49,109 @@ public class Convert {
     public static final String USAGE = "sas-convert-0.2.jar [option] file.sas [file.csv]";
     Logger log = LoggerFactory.getLogger(getClass());
 
+    /**
+     * The date formats to store the day, month, and year. Appear in the data of the
+     * {@link SasFileParser.FormatAndLabelSubheader} subheader and are stored in {@link Column#format}.
+     */
+    List<String> DATE_FORMAT_STRINGS = Arrays.asList("DATE",
+                                        "YYMMDD", "YYMMDDB", "YYMMDDC", "YYMMDDD", "YYMMDDN", "YYMMDDP", "YYMMDDS",
+                                        "MMDDYY", "MMDDYYB", "MMDDYYC", "MMDDYYD", "MMDDYYN", "MMDDYYP", "MMDDYYS",
+                                        "DDMMYY", "DDMMYYB", "DDMMYYC", "DDMMYYD", "DDMMYYN", "DDMMYYP", "DDMMYYS",
+                                        "MMYY", "MMYYC", "MMYYD", "MMYYN", "MMYYP", "MMYYS",
+                                        "YYMM", "YYMMC", "YYMMD", "YYMMN", "YYMMP", "YYMMS",
+                                        "MONYY",
+                                        "YYMON");
+
+    /**
+     * The date formats to store the day, month, year, hour, minutes, seconds, and milliseconds. Appear in the data
+     * of the {@link SasFileParser.FormatAndLabelSubheader} subheader and are stored in {@link Column#format}.
+     */
+    private static final List<String> DATE_TIME_FORMAT_STRINGS = Collections.singletonList("DATETIME");
+
+    /** 
+     * The time formats to store the hour, minutes, seconds, and milliseconds. Appear in the data of
+     * the {@link SasFileParser.FormatAndLabelSubheader} subheader and are stored in {@link Column#format}.
+     */
+    private static final List<String> TIME_FORMAT_STRINGS = Arrays.asList("TIME", "HHMM");
+
+    /**
+     * Enumerated format masks
+     */
+    private enum FormatMask {
+        STRING, NUMBER, DATE, DATETIME, TIME
+    }
+
+    /**
+     * The number of seconds in a minute.
+     */
+    private static final int SECONDS_IN_MINUTE = 60;
+
+    /**
+     * The number of minutes in an hour.
+     */
+    private static final int MINUTES_IN_HOUR = 60;
+
+    /**
+     * If the number of digits in a double value exceeds a given constant, it rounds off.
+     */
+    private static final int ROUNDING_LENGTH = 13;
+
+    /**
+     * The number of digits starting from the first non-zero value, used to round doubles.
+     */
+    private static final int ACCURACY = 15;
+
+    /**
+     * The function to convert a double value into a string. If the text presentation of the double is longer
+     * than {@link CSVDataWriterImpl#ROUNDING_LENGTH}, the rounded off value of the double includes
+     * the {@link CSVDataWriterImpl#ACCURACY} number of digits from the first non-zero value.
+     *
+     * @param value the input numeric value to convert.
+     * @return the string with the text presentation of the input numeric value.
+     */
+    private static String convertDoubleElementToString(Double value) {
+        BigDecimal bigDecimal = new BigDecimal(Double.toString(value));
+        String valueToPrint = bigDecimal.stripTrailingZeros().toPlainString();
+                                
+        if (valueToPrint.length() > ROUNDING_LENGTH) {
+            int lengthBeforeDot = (int) Math.ceil(Math.log10(Math.abs(value)));
+            bigDecimal = bigDecimal.setScale(ACCURACY - lengthBeforeDot, BigDecimal.ROUND_HALF_UP);
+            valueToPrint = bigDecimal.stripTrailingZeros().toPlainString();
+        }
+        return valueToPrint;
+    }
+
+    /**
+     * The main function to convert from SAS to CSV
+     */
     public void convert(InputStream in, OutputStream out, int max) throws IOException {
         SasFileReader reader = new SasFileReaderImpl(in);
         CSVWriter writer = new CSVWriter(new OutputStreamWriter(out));
         Object[] data;
         List<Column> columns = reader.getColumns();
+        FormatMask[] formatMasks = new FormatMask[columns.size()];
         String[] outData = new String[columns.size()];
+        // Format masks
+        for(int i=0; i < columns.size(); i++) {
+            if (columns.get(i).getType().getName() == "java.lang.Number") {
+                String colType = columns.get(i).getFormat();
+                if (DATE_FORMAT_STRINGS.contains(colType)) {
+                   formatMasks[i] = FormatMask.DATE;
+                }
+                else if (DATE_TIME_FORMAT_STRINGS.contains(colType)) {
+                    formatMasks[i] = FormatMask.DATETIME;
+                }
+                else if (TIME_FORMAT_STRINGS.contains(colType)) {
+                    formatMasks[i] = FormatMask.TIME;
+                }
+                else {
+                    formatMasks[i] = FormatMask.NUMBER;
+                }
+            }
+            else {
+                formatMasks[i] = FormatMask.STRING;
+            }
+        }
         // Writing column names
         for(int i=0; i < columns.size(); i++) {
             outData[i] = columns.get(i).getName();
@@ -57,13 +160,48 @@ public class Convert {
 
         try {
             long rowCount = 0;
+            SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
+            SimpleDateFormat dateTimeFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+            
             while((data = reader.readNext()) != null) {
                 if (max != -1 && rowCount >= max) {
                     break;
                 }
                 assert(columns.size() == data.length);
                 for(int i=0; i < data.length; i++) {
-                    outData[i] = data[i] == null ? "" : data[i].toString();
+                    if (data[i] != null)
+                    {
+                        switch (formatMasks[i]) {
+                            case DATE:
+                                outData[i] = dateFormat.format(data[i]);
+                                break;
+                            case DATETIME:
+                                outData[i] = dateTimeFormat.format(data[i]);
+                                break;
+                            case TIME:
+                                Integer secondsFromMidnight = Integer.parseInt(data[i].toString());
+                                outData[i] = String.format("%02d", secondsFromMidnight / SECONDS_IN_MINUTE / MINUTES_IN_HOUR)
+                                                            + ":"
+                                                            + String.format("%02d", secondsFromMidnight / SECONDS_IN_MINUTE % MINUTES_IN_HOUR)
+                                                            + ":"
+                                                            + String.format("%02d", secondsFromMidnight % SECONDS_IN_MINUTE);
+                                break;
+                            case NUMBER:
+                                if (data[i] instanceof Double) {
+                                    outData[i] = convertDoubleElementToString((Double) data[i]);
+                                }
+                                else {
+                                    outData[i] = data[i].toString();
+                                }
+                                break;
+                            default:
+                                outData[i] = data[i].toString();
+                                break;
+                        }
+                    }
+                    else {
+                        outData[i] = null;
+                    }
                 }
                 writer.writeNext(outData);
                 rowCount++;
