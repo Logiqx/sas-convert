@@ -196,6 +196,16 @@ public class Convert {
                                 break;
                             default:
                                 outData[i] = data[i].toString();
+                                // Remove NUL bytes
+                                if (outData[i].contains("\0")) {
+                                    outData[i] = outData[i].replaceAll("\0", "");
+                                }
+                                // Replace newline characters with space
+                                if (outData[i].contains("\n")) {
+                                    outData[i] = outData[i].replaceAll("\n", " ");
+                                }
+                                // Trim whitespace
+                                outData[i] = outData[i].trim();
                                 break;
                         }
                     }
